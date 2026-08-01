@@ -1,0 +1,30 @@
+[package]
+name = "ec-login"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# 登录模块验证：用纯 Rust + reqwest 实现 EasyConnect 登录流程。
+# 这部分走普通 HTTPS（/por/login_auth.csp, /por/login_psw.csp），
+# 不涉及 Sangfor 的特殊 TLS 指纹（那只在隧道握手层才需要）。
+# 因此可以独立于 boring 编译验证。
+
+[dependencies]
+# HTTP 客户端，必须能忽略自签名证书（danger_accept_invalid_certs）
+reqwest = { version = "0.12", features = ["blocking", "rustls-tls"], default-features = false }
+# 正则提取 XML 里的字段（对照 Go 的 regexp）
+regex = "1"
+# RSA 加密密码（对照 Go crypto/rsa EncryptPKCS1v15）
+# rsa crate 内部用 num-bigint-dig 并重导出为 rsa::BigUint，
+# 不要单独引入 num-bigint（两者是不同 crate，类型不兼容）
+rsa = "0.9"
+# hex 编码（对照 Go hex.EncodeToString）
+hex = "0.4"
+# URL 编码表单（对照 Go net/url Values.Encode）
+urlencoding = "2"
+# 错误派生
+thiserror = "1"
+# 序列化（Resource 给 ec-app emit 用）
+serde = { version = "1", features = ["derive"] }
+# XML 解析（资源列表 rclist.csp 的 <Rc> 标签）
+roxmltree = "0.20"

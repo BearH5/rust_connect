@@ -1,0 +1,31 @@
+[package]
+name = "ec-proxy"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+ec-protocol = { path = "../ec-protocol" }
+# smoltcp：只启用 IPv4 + TCP + IP medium（L3 模式，对照 TUN）
+smoltcp = { version = "0.12", default-features = false, features = ["std", "proto-ipv4", "socket-tcp", "medium-ip"] }
+# async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "time"] }
+# 日志
+log = "0.4"
+env_logger = "0.11"
+# SOCKS5 协议（握手/命令解析/错误回复）
+fast-socks5 = "0.10"
+# 自旋锁（smoltcp 控制 block 用）
+spin = "0.9"
+# 随机数（local_port / random_seed）
+rand = "0.8"
+# TUN 虚拟网卡（全局代理模式；Windows 下用 wintun-bindings 后端）
+tun2 = "4"
+
+[dev-dependencies]
+# 示例需要独立调用登录（ec-protocol 不 re-export ec-login）
+ec-login = { path = "../ec-login" }
+
+[[example]]
+name = "socks_demo"
+path = "examples/socks_demo.rs"

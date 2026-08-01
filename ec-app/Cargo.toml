@@ -1,0 +1,27 @@
+[package]
+name = "ec-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+ec-proxy = { path = "../ec-proxy" }
+ec-login = { path = "../ec-login" }
+ec-protocol = { path = "../ec-protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "net", "io-util", "time"] }
+log = "0.4"
+# 开机自启
+tauri-plugin-autostart = "2"
+# Windows 注册表读写（系统代理设置）
+winreg = "0.55"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1

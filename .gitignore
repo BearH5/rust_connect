@@ -1,0 +1,21 @@
+# Rust 构建产物
+**/target/
+
+# Node 构建产物
+ui/node_modules/
+ui/dist/
+
+# Go 编译产物（diag 诊断程序）
+diag/*.exe
+
+# 运行时产物
+*.dll
+*.pdb
+*.zip
+
+# 系统/编辑器
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.a

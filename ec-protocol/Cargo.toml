@@ -1,0 +1,25 @@
+[package]
+name = "ec-protocol"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# EasyConnect 隧道层：token 构造 + RequestIP/RecvConn/SendConn + L3Conn 收发。
+# 依赖 ec-utls（TLS+FFI）和 ec-login（拿 twfID）。
+# 对照 zju-connect/client/easyconnect/ 的 request.go / protocol.go / l3conn.go。
+
+[dependencies]
+ec-utls = { path = "../ec-utls" }
+ec-login = { path = "../ec-login" }
+# hex 编码 ServerHello session_id（对照 request.go:591 hex.EncodeToString）
+hex = "0.4"
+# 错误派生
+thiserror = "1"
+
+[[example]]
+name = "full_tunnel"
+path = "examples/full_tunnel.rs"
+
+[[example]]
+name = "login_only"
+path = "examples/login_only.rs"
