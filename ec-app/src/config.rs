@@ -1,6 +1,8 @@
 //! JSON 配置持久化：profiles + 全局设置。
 //!
-//! 配置文件路径：`%APPDATA%/rust_connect/config.json`。
+//! 配置文件路径：`<config_dir>/rust_connect/config.json`，
+//! 其中 `config_dir` 由 `dirs::config_dir()` 决定
+//!（Windows: `%APPDATA%`，Linux: `~/.config`，macOS: `~/Library/Application Support`）。
 //! 不存在时返回默认空配置，并在首次 `save()` 时创建目录。
 
 use serde::{Deserialize, Serialize};
@@ -87,7 +89,7 @@ pub struct ConfigStore {
 }
 
 impl ConfigStore {
-    /// 加载配置。路径：`%APPDATA%/rust_connect/config.json`。
+    /// 加载配置。路径：`<config_dir>/rust_connect/config.json`。
     /// 文件不存在或解析失败则返回默认空配置（并记录路径供后续 save）。
     pub fn load() -> Self {
         let path = Self::config_path();
@@ -114,12 +116,14 @@ impl ConfigStore {
 
     /// 计算配置文件路径。
     ///
-    /// Windows: `%APPDATA%/rust_connect/config.json`
-    /// 其它/兜底: 当前目录下的 `rust_connect/config.json`。
+    /// 通过 `dirs::config_dir()` 获取跨平台配置目录：
+    /// - Windows: `%APPDATA%` (C:\Users\<user>\AppData\Roaming)
+    /// - Linux: `~/.config`
+    /// - macOS: `~/Library/Application Support`
+    /// 兜底: 当前目录。
     fn config_path() -> PathBuf {
-        let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
-        PathBuf::from(base)
-            .join("rust_connect")
-            .join("config.json")
+        let base =
+            dirs::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        base.join("rust_connect").join("config.json")
     }
 }
