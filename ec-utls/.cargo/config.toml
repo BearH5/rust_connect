@@ -1,2 +1,2 @@
-[build]
-target = "x86_64-pc-windows-gnu"
+# target 行已删除：硬编码 target 会让 Linux 交叉编译到 Windows。
+# 各平台用默认 host target。Windows 如需 gnu，通过 rustup default 设置。
