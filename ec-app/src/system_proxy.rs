@@ -9,10 +9,22 @@
 //!   5. 断开时停 HTTP server + 恢复原始代理设置
 
 use std::sync::Arc;
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
 use winreg::enums::*;
+#[cfg(windows)]
 use winreg::RegKey;
 
+/// Windows 创建进程标志：不弹控制台窗口。
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+#[cfg(windows)]
 const INTERNET_SETTINGS: &str = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
+
 pub const PAC_HTTP_PORT: u16 = 1421;
 
 /// 资源条目（与 ec_login::Resource 对应）。
@@ -174,79 +186,125 @@ pub fn start_pac_server(pac_content: String) -> tokio::task::JoinHandle<()> {
 }
 
 /// 保存当前系统代理设置（断开时恢复用）。
+///
+/// Windows：读注册表 HKCU\...\Internet Settings 的 AutoConfigURL / ProxyOverride。
+/// Linux：无注册表式全局状态，返回空设置（GNOME/KDE 改 gsettings 后，
+///   断开时 restore() 会把 mode 设回 none，不需要预先保存原值）。
+/// 其它平台：返回默认（空）设置。
 pub fn save_original() -> OriginalProxySettings {
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let settings = hkcu.open_subkey(INTERNET_SETTINGS);
-    match settings {
-        Ok(s) => OriginalProxySettings {
-            auto_config_url: s.get_value::<String, _>("AutoConfigURL").ok(),
-            proxy_override: s.get_value::<String, _>("ProxyOverride").ok(),
-        },
-        Err(_) => OriginalProxySettings::default(),
+    #[cfg(target_os = "windows")]
+    {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let settings = hkcu.open_subkey(INTERNET_SETTINGS);
+        match settings {
+            Ok(s) => OriginalProxySettings {
+                auto_config_url: s.get_value::<String, _>("AutoConfigURL").ok(),
+                proxy_override: s.get_value::<String, _>("ProxyOverride").ok(),
+            },
+            Err(_) => OriginalProxySettings::default(),
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        OriginalProxySettings::default()
     }
 }
 
-/// 启用系统代理：设 AutoConfigURL 指向本地 HTTP PAC + 清除 ProxyOverride 内网网段。
+/// 启用系统代理：设 AutoConfigURL 指向本地 HTTP PAC。
+///
+/// Windows：写注册表 AutoConfigURL + 过滤 ProxyOverride 内网网段 + 通知刷新。
+/// Linux：GNOME/KDE 调 gsettings/kwriteconfig5 设 PAC；其它桌面仅提示。
+/// 其它平台：空操作。
 pub fn enable() -> std::io::Result<()> {
-    let pac_url = format!("http://127.0.0.1:{PAC_HTTP_PORT}/proxy.pac");
+    #[cfg(target_os = "windows")]
+    {
+        let pac_url = format!("http://127.0.0.1:{PAC_HTTP_PORT}/proxy.pac");
 
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let (key, _) = hkcu.create_subkey(INTERNET_SETTINGS)?;
-    key.set_value("AutoConfigURL", &pac_url)?;
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let (key, _) = hkcu.create_subkey(INTERNET_SETTINGS)?;
+        key.set_value("AutoConfigURL", &pac_url)?;
 
-    // 过滤 ProxyOverride 移除内网网段（避免绕过 PAC）
-    if let Ok(current_override) = key.get_value::<String, _>("ProxyOverride") {
-        let filtered: Vec<&str> = current_override
-            .split(';')
-            .filter(|item| {
-                let item = item.trim().to_lowercase();
-                !(item.starts_with("192.168.")
-                    || item.starts_with("10.")
-                    || item.starts_with("172.1")
-                    || item.starts_with("172.2")
-                    || item.starts_with("172.3")
-                    || item == "localhost"
-                    || item == "*.local")
-            })
-            .collect();
-        let new_override = filtered.join(";");
-        key.set_value("ProxyOverride", &new_override)?;
-        log::info!("ProxyOverride 过滤: {} -> {}", current_override, new_override);
+        // 过滤 ProxyOverride 移除内网网段（避免绕过 PAC）
+        if let Ok(current_override) = key.get_value::<String, _>("ProxyOverride") {
+            let filtered: Vec<&str> = current_override
+                .split(';')
+                .filter(|item| {
+                    let item = item.trim().to_lowercase();
+                    !(item.starts_with("192.168.")
+                        || item.starts_with("10.")
+                        || item.starts_with("172.1")
+                        || item.starts_with("172.2")
+                        || item.starts_with("172.3")
+                        || item == "localhost"
+                        || item == "*.local")
+                })
+                .collect();
+            let new_override = filtered.join(";");
+            key.set_value("ProxyOverride", &new_override)?;
+            log::info!("ProxyOverride 过滤: {} -> {}", current_override, new_override);
+        }
+
+        notify_settings_changed();
+        log::info!("系统代理已启用: {pac_url}");
+        Ok(())
     }
-
-    notify_settings_changed();
-    log::info!("系统代理已启用: {pac_url}");
-    Ok(())
+    #[cfg(target_os = "linux")]
+    {
+        let pac_url = format!("http://127.0.0.1:{PAC_HTTP_PORT}/proxy.pac");
+        linux_proxy::enable(&pac_url)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        Ok(())
+    }
 }
 
 /// 恢复原始系统代理设置。
+///
+/// Windows：按保存的原值写回注册表 + 通知刷新。
+/// Linux：GNOME/KDE 调 gsettings/kwriteconfig5 把代理关掉（mode=none）。
+/// 其它平台：空操作。
 pub fn restore(original: OriginalProxySettings) -> std::io::Result<()> {
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let (key, _) = hkcu.create_subkey(INTERNET_SETTINGS)?;
+    #[cfg(target_os = "windows")]
+    {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let (key, _) = hkcu.create_subkey(INTERNET_SETTINGS)?;
 
-    match original.auto_config_url {
-        Some(url) => {
-            key.set_value("AutoConfigURL", &url)?;
+        match original.auto_config_url {
+            Some(url) => {
+                key.set_value("AutoConfigURL", &url)?;
+            }
+            None => {
+                let _ = key.delete_value("AutoConfigURL");
+            }
         }
-        None => {
-            let _ = key.delete_value("AutoConfigURL");
+        match original.proxy_override {
+            Some(ov) => {
+                key.set_value("ProxyOverride", &ov)?;
+            }
+            None => {
+                let _ = key.delete_value("ProxyOverride");
+            }
         }
-    }
-    match original.proxy_override {
-        Some(ov) => {
-            key.set_value("ProxyOverride", &ov)?;
-        }
-        None => {
-            let _ = key.delete_value("ProxyOverride");
-        }
-    }
 
-    notify_settings_changed();
-    log::info!("系统代理已恢复");
-    Ok(())
+        notify_settings_changed();
+        log::info!("系统代理已恢复");
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = original; // Linux 不依赖保存的原值，直接关代理
+        linux_proxy::restore()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        let _ = original;
+        Ok(())
+    }
 }
 
 /// 调 Win32 InternetSetOption 通知系统代理设置已变更。
+#[cfg(target_os = "windows")]
 fn notify_settings_changed() {
     let _ = std::process::Command::new("powershell")
         .args([
@@ -254,5 +312,111 @@ fn notify_settings_changed() {
             "-Command",
             "Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class WinINET{[DllImport(\"wininet.dll\",SetLastError=true)]public static extern bool InternetSetOption(IntPtr h,int o,IntPtr b,int l);}'; [WinINET]::InternetSetOption([IntPtr]::Zero,39,[IntPtr]::Zero,0); [WinINET]::InternetSetOption([IntPtr]::Zero,37,[IntPtr]::Zero,0)",
         ])
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn();
+}
+
+/// Linux 系统代理实现：通过 gsettings（GNOME）/ kwriteconfig5（KDE）设 PAC，
+/// 其它桌面仅提示（影响新进程的环境变量方案有限，建议手动配置浏览器代理）。
+#[cfg(target_os = "linux")]
+mod linux_proxy {
+    use std::io;
+    use std::process::Command;
+
+    /// 检测到的桌面环境类型，决定用哪种代理配置后端。
+    enum Desktop {
+        Gnome,
+        Kde,
+        Generic,
+    }
+
+    /// 根据 XDG_CURRENT_DESKTOP 环境变量识别桌面环境。
+    fn detect_desktop() -> Desktop {
+        match std::env::var("XDG_CURRENT_DESKTOP")
+            .unwrap_or_default()
+            .to_uppercase()
+            .as_str()
+        {
+            d if d.contains("GNOME") || d.contains("UNITY") || d.contains("CINNAMON") => {
+                Desktop::Gnome
+            }
+            d if d.contains("KDE") => Desktop::Kde,
+            _ => Desktop::Generic,
+        }
+    }
+
+    /// 设系统代理指向 PAC URL。
+    pub fn enable(pac_url: &str) -> io::Result<()> {
+        match detect_desktop() {
+            Desktop::Gnome => {
+                Command::new("gsettings")
+                    .args(["set", "org.gnome.system.proxy", "mode", "auto"])
+                    .status()?;
+                Command::new("gsettings")
+                    .args(["set", "org.gnome.system.proxy", "autoconfig-url", pac_url])
+                    .status()?;
+                log::info!("系统代理已设置（GNOME: autoconfig {}）", pac_url);
+            }
+            Desktop::Kde => {
+                Command::new("kwriteconfig5")
+                    .args([
+                        "--file",
+                        "kioslaverc",
+                        "--group",
+                        "Proxy Settings",
+                        "--key",
+                        "Proxy Type",
+                        "4",
+                    ])
+                    .status()?;
+                Command::new("kwriteconfig5")
+                    .args([
+                        "--file",
+                        "kioslaverc",
+                        "--group",
+                        "Proxy Settings",
+                        "--key",
+                        "Proxy Config Script",
+                        pac_url,
+                    ])
+                    .status()?;
+                log::info!("系统代理已设置（KDE: PAC {}）", pac_url);
+            }
+            Desktop::Generic => {
+                log::info!(
+                    "检测到非 GNOME/KDE 桌面，仅设环境变量（影响新进程）。建议手动配置浏览器代理。"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// 恢复：关掉系统代理。Linux 无注册表式全局状态，无需预先保存原值，
+    /// 直接把代理 mode 设回 none（GNOME）/ Proxy Type=0（KDE）。
+    pub fn restore() -> io::Result<()> {
+        match detect_desktop() {
+            Desktop::Gnome => {
+                Command::new("gsettings")
+                    .args(["set", "org.gnome.system.proxy", "mode", "none"])
+                    .status()?;
+                log::info!("系统代理已恢复（GNOME: none）");
+            }
+            Desktop::Kde => {
+                Command::new("kwriteconfig5")
+                    .args([
+                        "--file",
+                        "kioslaverc",
+                        "--group",
+                        "Proxy Settings",
+                        "--key",
+                        "Proxy Type",
+                        "0",
+                    ])
+                    .status()?;
+                log::info!("系统代理已恢复（KDE）");
+            }
+            Desktop::Generic => {}
+        }
+        Ok(())
+    }
 }
