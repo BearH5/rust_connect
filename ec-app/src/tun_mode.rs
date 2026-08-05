@@ -9,9 +9,16 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use ec_proxy::tun::{TunBridge, TunRoute};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Notify;
+
+/// Windows 创建进程标志：不弹控制台窗口（与 ec-proxy::tun 一致）。
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// 更新系统托盘 tooltip，反映连接状态。
 fn update_tray_tooltip(app: &AppHandle, text: &str) {
@@ -31,20 +38,47 @@ struct ProgressPayload<'a> {
 ///
 /// Windows：执行 `net session`——该命令只有管理员能成功（非管理员返回
 /// "Access is denied"）。比起 Win32 token 检查，子进程方案零额外依赖且可靠。
-/// 非 Windows：TUN 模式暂未支持，直接返回 false。
+/// Linux：检查进程是否拥有 CAP_NET_ADMIN 能力（解析 /proc/self/status 的
+/// CapEff 位图，bit 12 即 CAP_NET_ADMIN）。
+/// 其它平台：TUN 模式暂未支持，直接返回 false。
 pub fn is_admin() -> bool {
-    #[cfg(windows)]
+    #[cfg(target_os = "linux")]
+    {
+        has_cap_net_admin()
+    }
+    #[cfg(target_os = "windows")]
     {
         std::process::Command::new("net")
             .args(["session"])
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         false
     }
+}
+
+/// Linux：检查当前进程是否拥有 CAP_NET_ADMIN 能力。
+///
+/// 读 /proc/self/status，解析 `CapEff:` 行（有效能力位图，16 进制）。
+/// CAP_NET_ADMIN = 12，bit 12 置位表示有此能力。
+#[cfg(target_os = "linux")]
+fn has_cap_net_admin() -> bool {
+    let status = match std::fs::read_to_string("/proc/self/status") {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    for line in status.lines() {
+        if let Some(hex) = line.strip_prefix("CapEff:\t") {
+            if let Ok(cap) = u64::from_str_radix(hex.trim(), 16) {
+                return (cap & (1 << 12)) != 0;
+            }
+        }
+    }
+    false
 }
 
 /// 以管理员身份重新启动当前进程（UAC 弹窗）。
@@ -53,8 +87,16 @@ pub fn is_admin() -> bool {
 /// 重启时带 `--relaunched-as-admin` 参数，新实例据此跳过再次提权。
 /// 返回 Ok(true) 表示已发起提权（当前实例应退出），
 /// Ok(false) 表示用户取消了 UAC（留在当前实例）。
+///
+/// Linux：不走重启提权，返回 Ok(false)。调用方检测 is_admin() == false 时
+/// 应提示用户手动 `sudo setcap cap_net_admin+ep <exe>`（见 commands.rs）。
 pub fn relaunch_as_admin() -> std::io::Result<bool> {
-    #[cfg(windows)]
+    #[cfg(target_os = "linux")]
+    {
+        // setcap 方案：不重启。调用方检测 is_admin() == false 时提示用户手动 setcap。
+        Ok(false)
+    }
+    #[cfg(target_os = "windows")]
     {
         let exe = std::env::current_exe()?;
         let exe_str = exe.to_string_lossy().to_string();
@@ -66,12 +108,12 @@ pub fn relaunch_as_admin() -> std::io::Result<bool> {
         );
         let out = std::process::Command::new("powershell")
             .args(["-NoProfile", "-Command", &script])
+            .creation_flags(CREATE_NO_WINDOW)
             .output()?;
         Ok(out.status.success())
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
-        let _ = (); // 非 Windows 暂不支持
         Ok(false)
     }
 }
@@ -83,65 +125,80 @@ pub fn relaunch_as_admin() -> std::io::Result<bool> {
 /// Expand-Archive 解压后从 `wintun/bin/amd64/wintun.dll` 拷贝过去，
 /// 并清理临时 zip 与解压目录。
 pub fn ensure_wintun() -> std::io::Result<PathBuf> {
-    let dir = std::env::var("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir())
-        .join("rust_connect");
-    std::fs::create_dir_all(&dir)?;
-    let dll_path = dir.join("wintun.dll");
-
-    if dll_path.exists() {
-        return Ok(dll_path);
+    #[cfg(target_os = "linux")]
+    {
+        // Linux 用内核 tun，不需要 wintun.dll
+        Ok(PathBuf::new())
     }
+    #[cfg(target_os = "windows")]
+    {
+        let dir = std::env::var("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir())
+            .join("rust_connect");
+        std::fs::create_dir_all(&dir)?;
+        let dll_path = dir.join("wintun.dll");
 
-    // 下载 zip
-    let zip_path = dir.join("wintun.zip");
-    let download_cmd = format!(
-        "Invoke-WebRequest -Uri 'https://www.wintun.net/builds/wintun-0.14.1.zip' -OutFile '{}'",
-        zip_path.display()
-    );
-    let status = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", download_cmd.as_str()])
-        .status()?;
-    if !status.success() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "wintun.dll 下载失败",
-        ));
-    }
+        if dll_path.exists() {
+            return Ok(dll_path);
+        }
 
-    // 解压
-    let extract_cmd = format!(
-        "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
-        zip_path.display(),
-        dir.display()
-    );
-    let status = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", extract_cmd.as_str()])
-        .status()?;
-    if !status.success() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "wintun.zip 解压失败",
-        ));
-    }
+        // 下载 zip
+        let zip_path = dir.join("wintun.zip");
+        let download_cmd = format!(
+            "Invoke-WebRequest -Uri 'https://www.wintun.net/builds/wintun-0.14.1.zip' -OutFile '{}'",
+            zip_path.display()
+        );
+        let status = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", download_cmd.as_str()])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()?;
+        if !status.success() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "wintun.dll 下载失败",
+            ));
+        }
 
-    // 解压后结构: dir/wintun/bin/amd64/wintun.dll
-    let extracted = dir
-        .join("wintun")
-        .join("bin")
-        .join("amd64")
-        .join("wintun.dll");
-    if !extracted.exists() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "解压后找不到 wintun.dll",
-        ));
+        // 解压
+        let extract_cmd = format!(
+            "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
+            zip_path.display(),
+            dir.display()
+        );
+        let status = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", extract_cmd.as_str()])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()?;
+        if !status.success() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "wintun.zip 解压失败",
+            ));
+        }
+
+        // 解压后结构: dir/wintun/bin/amd64/wintun.dll
+        let extracted = dir
+            .join("wintun")
+            .join("bin")
+            .join("amd64")
+            .join("wintun.dll");
+        if !extracted.exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "解压后找不到 wintun.dll",
+            ));
+        }
+        std::fs::copy(&extracted, &dll_path)?;
+        let _ = std::fs::remove_file(&zip_path);
+        let _ = std::fs::remove_dir_all(dir.join("wintun"));
+        Ok(dll_path)
     }
-    std::fs::copy(&extracted, &dll_path)?;
-    let _ = std::fs::remove_file(&zip_path);
-    let _ = std::fs::remove_dir_all(dir.join("wintun"));
-    Ok(dll_path)
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        // 其它平台不需要 wintun.dll
+        Ok(PathBuf::new())
+    }
 }
 
 /// 把资源列表的 host 字段转成路由（/24 网段近似）。
@@ -301,13 +358,13 @@ pub async fn connect_tun_vpn(
             let server = keepalive_server.clone();
             let twf = keepalive_twf.clone();
             let result = tokio::task::spawn_blocking(move || {
-                ec_login::keep_session_alive(&server, &twf)
+                ec_protocol::token::keep_session_alive(&server, &twf)
             })
             .await;
             match result {
-                Ok(Ok(())) => log::debug!("会话保活成功"),
-                Ok(Err(e)) => log::warn!("会话保活失败: {e}"),
-                Err(e) => log::warn!("会话保活 task panic: {e}"),
+                Ok(Ok(())) => log::info!("[保活] update_session 成功"),
+                Ok(Err(e)) => log::warn!("[保活] update_session 失败: {e}"),
+                Err(e) => log::warn!("[保活] task panic: {e}"),
             }
         }
     });

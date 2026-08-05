@@ -68,7 +68,25 @@ pub async fn connect(
     // TUN 模式预检：管理员权限 + wintun.dll
     let wintun_path = if is_tun_mode {
         if !crate::tun_mode::is_admin() {
-            return Err("TUN 模式需要管理员权限，请以管理员身份运行本程序".into());
+            #[cfg(target_os = "linux")]
+            {
+                let exe = std::env::current_exe()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "<ec-app>".into());
+                return Err(format!(
+                    "TUN 模式需要 CAP_NET_ADMIN 权限。请运行以下命令后重启程序：\n\
+                     sudo setcap cap_net_admin+ep {}",
+                    exe
+                ));
+            }
+            #[cfg(target_os = "windows")]
+            {
+                return Err("TUN 模式需要管理员权限，请以管理员身份运行本程序".into());
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+            {
+                return Err("TUN 模式当前不支持此平台".into());
+            }
         }
         Some(
             tokio::task::spawn_blocking(crate::tun_mode::ensure_wintun)
@@ -135,20 +153,39 @@ pub async fn connect_tun(
     state: State<'_, AppState>,
     profile_id: String,
 ) -> Result<(), String> {
-    // 1. 检查管理员权限（net session 需管理员才能成功）
+    // 1. 检查管理员权限
     if !crate::tun_mode::is_admin() {
-        // 方案 B：UAC 提权重启当前程序。新实例以管理员运行后，
-        // 用户再点连接即可。返回提示让前端显示。
-        match crate::tun_mode::relaunch_as_admin() {
-            Ok(true) => {
-                return Err("已请求管理员权限，请在弹出的确认窗口点击「是」。新窗口启动后再次点击连接即可。".into());
+        #[cfg(target_os = "linux")]
+        {
+            // Linux：用 setcap 授予 CAP_NET_ADMIN（不重启）。提示用户手动执行。
+            let exe = std::env::current_exe()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "<ec-app>".into());
+            return Err(format!(
+                "TUN 模式需要 CAP_NET_ADMIN 权限。请运行以下命令后重启程序：\n\
+                 sudo setcap cap_net_admin+ep {}",
+                exe
+            ));
+        }
+        #[cfg(target_os = "windows")]
+        {
+            // 方案 B：UAC 提权重启当前程序。新实例以管理员运行后，
+            // 用户再点连接即可。返回提示让前端显示。
+            match crate::tun_mode::relaunch_as_admin() {
+                Ok(true) => {
+                    return Err("已请求管理员权限，请在弹出的确认窗口点击「是」。新窗口启动后再次点击连接即可。".into());
+                }
+                Ok(false) => {
+                    return Err("需要管理员权限才能使用 TUN 模式。已尝试提权但被取消，请手动以管理员身份运行本程序，或改用系统代理模式。".into());
+                }
+                Err(e) => {
+                    return Err(format!("提权重启失败: {e}，请手动以管理员身份运行本程序，或改用系统代理模式。"));
+                }
             }
-            Ok(false) => {
-                return Err("需要管理员权限才能使用 TUN 模式。已尝试提权但被取消，请手动以管理员身份运行本程序，或改用系统代理模式。".into());
-            }
-            Err(e) => {
-                return Err(format!("提权重启失败: {e}，请手动以管理员身份运行本程序，或改用系统代理模式。"));
-            }
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        {
+            return Err("TUN 模式当前不支持此平台".into());
         }
     }
 
