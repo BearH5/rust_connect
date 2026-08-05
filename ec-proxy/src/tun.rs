@@ -19,7 +19,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use ec_protocol::l3conn::L3Conn;
+
+/// Windows 创建进程标志：不弹控制台窗口。
+/// powershell / net / route 等控制台程序默认会闪黑窗，加此标志后静默运行。
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// 内网路由（资源 IP 范围 → TUN 接口）。
 #[derive(Clone, Debug)]
@@ -87,53 +95,83 @@ impl TunBridge {
         log::info!("TUN 网卡已创建（接口地址 {}）", Ipv4Addr::from(client_ip));
 
         // 2. 加路由（内网网段 → TUN 接口，网关即本机 TUN 地址）。
-        // 用 PowerShell New-NetRoute 显式指定 -InterfaceIndex，避免路由落到物理网卡。
-        // 先查 RustConnect 网卡的 ifIndex。
-        let if_index = {
-            let out = std::process::Command::new("powershell")
-                .args([
-                    "-NoProfile",
-                    "-Command",
-                    "(Get-NetAdapter -Name 'RustConnect').ifIndex",
-                ])
-                .output();
-            match out {
-                Ok(o) if o.status.success() => {
-                    String::from_utf8_lossy(&o.stdout).trim().to_string()
-                }
-                _ => String::new(),
-            }
-        };
         let client_ip_str = format!("{}.{}.{}.{}", client_ip[0], client_ip[1], client_ip[2], client_ip[3]);
-        for route in routes {
-            // New-NetRoute -DestinationPrefix <network>/24 -InterfaceIndex <idx> -NextHop <client_ip>
-            let cmd = if !if_index.is_empty() {
-                format!(
-                    "New-NetRoute -DestinationPrefix '{}/24' -InterfaceIndex {} -NextHop '{}' -ErrorAction SilentlyContinue; exit 0",
-                    route.network, if_index, client_ip_str
-                )
-            } else {
-                format!(
-                    "route add {} mask {} {} metric 1",
-                    route.network, route.mask, client_ip_str
-                )
-            };
-            let result = std::process::Command::new("powershell")
-                .args(["-NoProfile", "-Command", &cmd])
-                .output();
-            match result {
-                Ok(out) if out.status.success() => {
-                    log::info!("路由添加成功: {} mask {} (ifIndex {})", route.network, route.mask, if_index);
-                }
-                Ok(out) => {
-                    let err = String::from_utf8_lossy(&out.stderr);
-                    // 路由已存在不算失败
-                    if !err.contains("already exists") && !err.contains("The object already exists") {
-                        log::warn!("路由添加失败 {}: {}", route.network, err);
+
+        // Windows: 用 PowerShell New-NetRoute 显式指定 -InterfaceIndex，避免路由落到物理网卡。
+        // 先查 RustConnect 网卡的 ifIndex。
+        #[cfg(target_os = "windows")]
+        {
+            let if_index = {
+                let out = std::process::Command::new("powershell")
+                    .args([
+                        "-NoProfile",
+                        "-Command",
+                        "(Get-NetAdapter -Name 'RustConnect').ifIndex",
+                    ])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .output();
+                match out {
+                    Ok(o) if o.status.success() => {
+                        String::from_utf8_lossy(&o.stdout).trim().to_string()
                     }
+                    _ => String::new(),
                 }
-                Err(e) => log::warn!("route 命令失败: {e}"),
+            };
+            for route in routes {
+                // New-NetRoute -DestinationPrefix <network>/24 -InterfaceIndex <idx> -NextHop <client_ip>
+                let cmd = if !if_index.is_empty() {
+                    format!(
+                        "New-NetRoute -DestinationPrefix '{}/24' -InterfaceIndex {} -NextHop '{}' -ErrorAction SilentlyContinue; exit 0",
+                        route.network, if_index, client_ip_str
+                    )
+                } else {
+                    format!(
+                        "route add {} mask {} {} metric 1",
+                        route.network, route.mask, client_ip_str
+                    )
+                };
+                let result = std::process::Command::new("powershell")
+                    .args(["-NoProfile", "-Command", &cmd])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .output();
+                match result {
+                    Ok(out) if out.status.success() => {
+                        log::info!("路由添加成功: {} mask {} (ifIndex {})", route.network, route.mask, if_index);
+                    }
+                    Ok(out) => {
+                        let err = String::from_utf8_lossy(&out.stderr);
+                        // 路由已存在不算失败
+                        if !err.contains("already exists") && !err.contains("The object already exists") {
+                            log::warn!("路由添加失败 {}: {}", route.network, err);
+                        }
+                    }
+                    Err(e) => log::warn!("route 命令失败: {e}"),
+                }
             }
+        }
+
+        // Linux: 先 up 接口，再设地址，再加路由
+        #[cfg(target_os = "linux")]
+        {
+            let _ = std::process::Command::new("ip")
+                .args(["link", "set", "RustConnect", "up"])
+                .status();
+            let addr = format!("{}/24", client_ip_str);
+            let _ = std::process::Command::new("ip")
+                .args(["addr", "add", &addr, "dev", "RustConnect"])
+                .status();
+            for route in routes {
+                let net = format!("{}/24", route.network);
+                let _ = std::process::Command::new("ip")
+                    .args(["route", "add", &net, "dev", "RustConnect"])
+                    .status();
+                log::info!("路由添加: {} dev RustConnect", net);
+            }
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        {
+            let _ = &client_ip_str;
         }
 
         // 3. 双向转发：L3Conn 和 TUN 设备都拆成读写两半，各起一个 OS 线程
@@ -245,12 +283,31 @@ impl TunBridge {
 
     /// 清理路由（断开时调用）。
     pub fn cleanup_routes(routes: &[TunRoute], client_ip: [u8; 4]) {
-        let client_ip_str = format!("{}.{}.{}.{}", client_ip[0], client_ip[1], client_ip[2], client_ip[3]);
-        for route in routes {
-            let _ = std::process::Command::new("route")
-                .args(["delete", &route.network, "mask", &route.mask, &client_ip_str])
-                .output();
-            log::info!("路由已删除: {}", route.network);
+        #[cfg(target_os = "linux")]
+        {
+            let _ = client_ip;
+            for route in routes {
+                let net = format!("{}/24", route.network);
+                let _ = std::process::Command::new("ip")
+                    .args(["route", "del", &net, "dev", "RustConnect"])
+                    .status();
+                log::info!("路由已删除: {}", net);
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let client_ip_str = format!("{}.{}.{}.{}", client_ip[0], client_ip[1], client_ip[2], client_ip[3]);
+            for route in routes {
+                let _ = std::process::Command::new("route")
+                    .args(["delete", &route.network, "mask", &route.mask, &client_ip_str])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .output();
+                log::info!("路由已删除: {}", route.network);
+            }
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        {
+            let _ = (routes, client_ip);
         }
     }
 }
