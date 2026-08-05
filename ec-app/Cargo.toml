@@ -7,6 +7,12 @@ publish = false
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# 启用后 release 构建把 frontendDist 嵌入二进制（custom-protocol），
+# 否则运行时回退到 devUrl（localhost:1420），无 dev server 时白屏。
+# 用法：cargo build --release --features custom-protocol
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 ec-proxy = { path = "../ec-proxy" }
@@ -19,9 +25,16 @@ tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "net",
 log = "0.4"
 # 开机自启
 tauri-plugin-autostart = "2"
-# Windows 注册表读写（系统代理设置）
-winreg = "0.55"
+# 单实例：第二个实例启动时退出并激活已有窗口（VPN 软件不应多开）
+tauri-plugin-single-instance = "2"
+# 跨平台目录路径（config / data / cache 目录定位）
+dirs = "5"
 
 [profile.release]
 panic = "abort"
 codegen-units = 1
+lto = true
+strip = true
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
