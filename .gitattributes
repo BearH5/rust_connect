@@ -1,0 +1,5 @@
+# Shell 脚本强制 LF（CRLF 会让 #!/bin/bash\r 失败）
+*.sh text eol=lf
+
+# Windows 批处理强制 CRLF
+*.bat text eol=crlf
