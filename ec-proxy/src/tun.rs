@@ -45,6 +45,138 @@ impl TunRoute {
     }
 }
 
+/// 创建 TUN 网卡 + 配置地址/MTU + 加路由。
+///
+/// EasyConnect（TunBridge）和 GlobalProtect（gp_mode）共用此函数。
+/// 返回的 `Device` 可 `split()` 成 Reader/Writer 做双向转发。
+///
+/// - `client_ip`：TUN 接口地址（VPN 分配的内网 IP）
+/// - `netmask`：接口掩码
+/// - `mtu`：MTU（GP 服务器常返回 0，调用方应兜底 1400）
+/// - `routes`：要添加的内网路由（网段 -> TUN 接口）
+/// - `wintun_dll_path`：Windows 上 wintun.dll 路径（None 用默认查找）
+pub fn create_tun_device(
+    client_ip: [u8; 4],
+    netmask: [u8; 4],
+    mtu: u16,
+    routes: &[TunRoute],
+    wintun_dll_path: Option<&str>,
+) -> std::io::Result<tun2::Device> {
+    let mut config = tun2::configure();
+    config
+        .tun_name("RustConnect")
+        .address(Ipv4Addr::from(client_ip))
+        .netmask(Ipv4Addr::from(netmask))
+        .mtu(mtu)
+        .up();
+
+    // Windows 指定 wintun.dll 路径
+    #[cfg(windows)]
+    if let Some(path) = wintun_dll_path {
+        config.platform_config(|pc| {
+            pc.wintun_file(path);
+        });
+    }
+    #[cfg(not(windows))]
+    let _ = wintun_dll_path;
+
+    let device = tun2::create(&config)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("创建 TUN 失败: {e}")))?;
+    log::info!(
+        "TUN 网卡已创建（接口地址 {}，MTU {}）",
+        Ipv4Addr::from(client_ip),
+        mtu
+    );
+
+    let client_ip_str = format!(
+        "{}.{}.{}.{}",
+        client_ip[0], client_ip[1], client_ip[2], client_ip[3]
+    );
+
+    // Windows: 用 PowerShell New-NetRoute 显式指定 -InterfaceIndex，避免路由落到物理网卡。
+    #[cfg(target_os = "windows")]
+    {
+        let if_index = {
+            let out = std::process::Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    "(Get-NetAdapter -Name 'RustConnect').ifIndex",
+                ])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+            match out {
+                Ok(o) if o.status.success() => {
+                    String::from_utf8_lossy(&o.stdout).trim().to_string()
+                }
+                _ => String::new(),
+            }
+        };
+        for route in routes {
+            let cmd = if !if_index.is_empty() {
+                format!(
+                    "New-NetRoute -DestinationPrefix '{}/24' -InterfaceIndex {} -NextHop '{}' -ErrorAction SilentlyContinue; exit 0",
+                    route.network, if_index, client_ip_str
+                )
+            } else {
+                format!(
+                    "route add {} mask {} {} metric 1",
+                    route.network, route.mask, client_ip_str
+                )
+            };
+            let result = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-Command", &cmd])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+            match result {
+                Ok(out) if out.status.success() => {
+                    log::info!(
+                        "路由添加成功: {} mask {} (ifIndex {})",
+                        route.network,
+                        route.mask,
+                        if_index
+                    );
+                }
+                Ok(out) => {
+                    let err = String::from_utf8_lossy(&out.stderr);
+                    if !err.contains("already exists")
+                        && !err.contains("The object already exists")
+                    {
+                        log::warn!("路由添加失败 {}: {}", route.network, err);
+                    }
+                }
+                Err(e) => log::warn!("route 命令失败: {e}"),
+            }
+        }
+    }
+
+    // Linux: 先 up 接口，再设地址，再加路由
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("ip")
+            .args(["link", "set", "RustConnect", "up"])
+            .status();
+        let addr = format!("{}/24", client_ip_str);
+        let _ = std::process::Command::new("ip")
+            .args(["addr", "add", &addr, "dev", "RustConnect"])
+            .status();
+        for route in routes {
+            let net = format!("{}/24", route.network);
+            let _ = std::process::Command::new("ip")
+                .args(["route", "add", &net, "dev", "RustConnect"])
+                .status();
+            log::info!("路由添加: {} dev RustConnect", net);
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        let _ = &client_ip_str;
+    }
+
+    Ok(device)
+}
+
 /// TUN 模式桥接。持有停止标志和转发线程句柄。
 ///
 /// 注意：device 被 `split()` 消费后由两个转发线程的 Reader/Writer
@@ -71,110 +203,10 @@ impl TunBridge {
         routes: &[TunRoute],
         wintun_dll_path: Option<&str>,
     ) -> std::io::Result<Self> {
-        // 1. 建 TUN 网卡
-        let mut config = tun2::configure();
-        config
-            .tun_name("RustConnect")
-            .address(Ipv4Addr::from(client_ip))
-            .netmask(Ipv4Addr::new(255, 255, 255, 0))
-            .mtu(1400)
-            .up();
+        // 1. 建 TUN 网卡 + 路由（公共逻辑，GP 模式也复用）
+        let device = create_tun_device(client_ip, [255, 255, 255, 0], 1400, routes, wintun_dll_path)?;
 
-        // Windows 指定 wintun.dll 路径
-        #[cfg(windows)]
-        if let Some(path) = wintun_dll_path {
-            config.platform_config(|pc| {
-                pc.wintun_file(path);
-            });
-        }
-        #[cfg(not(windows))]
-        let _ = wintun_dll_path;
-
-        let device = tun2::create(&config)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("创建 TUN 失败: {e}")))?;
-        log::info!("TUN 网卡已创建（接口地址 {}）", Ipv4Addr::from(client_ip));
-
-        // 2. 加路由（内网网段 → TUN 接口，网关即本机 TUN 地址）。
-        let client_ip_str = format!("{}.{}.{}.{}", client_ip[0], client_ip[1], client_ip[2], client_ip[3]);
-
-        // Windows: 用 PowerShell New-NetRoute 显式指定 -InterfaceIndex，避免路由落到物理网卡。
-        // 先查 RustConnect 网卡的 ifIndex。
-        #[cfg(target_os = "windows")]
-        {
-            let if_index = {
-                let out = std::process::Command::new("powershell")
-                    .args([
-                        "-NoProfile",
-                        "-Command",
-                        "(Get-NetAdapter -Name 'RustConnect').ifIndex",
-                    ])
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .output();
-                match out {
-                    Ok(o) if o.status.success() => {
-                        String::from_utf8_lossy(&o.stdout).trim().to_string()
-                    }
-                    _ => String::new(),
-                }
-            };
-            for route in routes {
-                // New-NetRoute -DestinationPrefix <network>/24 -InterfaceIndex <idx> -NextHop <client_ip>
-                let cmd = if !if_index.is_empty() {
-                    format!(
-                        "New-NetRoute -DestinationPrefix '{}/24' -InterfaceIndex {} -NextHop '{}' -ErrorAction SilentlyContinue; exit 0",
-                        route.network, if_index, client_ip_str
-                    )
-                } else {
-                    format!(
-                        "route add {} mask {} {} metric 1",
-                        route.network, route.mask, client_ip_str
-                    )
-                };
-                let result = std::process::Command::new("powershell")
-                    .args(["-NoProfile", "-Command", &cmd])
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .output();
-                match result {
-                    Ok(out) if out.status.success() => {
-                        log::info!("路由添加成功: {} mask {} (ifIndex {})", route.network, route.mask, if_index);
-                    }
-                    Ok(out) => {
-                        let err = String::from_utf8_lossy(&out.stderr);
-                        // 路由已存在不算失败
-                        if !err.contains("already exists") && !err.contains("The object already exists") {
-                            log::warn!("路由添加失败 {}: {}", route.network, err);
-                        }
-                    }
-                    Err(e) => log::warn!("route 命令失败: {e}"),
-                }
-            }
-        }
-
-        // Linux: 先 up 接口，再设地址，再加路由
-        #[cfg(target_os = "linux")]
-        {
-            let _ = std::process::Command::new("ip")
-                .args(["link", "set", "RustConnect", "up"])
-                .status();
-            let addr = format!("{}/24", client_ip_str);
-            let _ = std::process::Command::new("ip")
-                .args(["addr", "add", &addr, "dev", "RustConnect"])
-                .status();
-            for route in routes {
-                let net = format!("{}/24", route.network);
-                let _ = std::process::Command::new("ip")
-                    .args(["route", "add", &net, "dev", "RustConnect"])
-                    .status();
-                log::info!("路由添加: {} dev RustConnect", net);
-            }
-        }
-
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-        {
-            let _ = &client_ip_str;
-        }
-
-        // 3. 双向转发：L3Conn 和 TUN 设备都拆成读写两半，各起一个 OS 线程
+        // 2. 双向转发：L3Conn 和 TUN 设备都拆成读写两半，各起一个 OS 线程
         let (mut tun_reader, mut tun_writer) = device.split();
         let (mut read_half, mut write_half) = l3conn.split();
 

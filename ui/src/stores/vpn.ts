@@ -13,6 +13,8 @@ export interface Profile {
   username: string
   password: string
   socks_port: number
+  /** 协议类型："easyconnect"（默认，Sangfor EasyConnect）或 "globalprotect"（Palo Alto GP）。 */
+  protocol: 'easyconnect' | 'globalprotect'
 }
 
 /** 全局设置。 */
@@ -152,6 +154,20 @@ export const useVpnStore = defineStore('vpn', {
       } catch (e) {
         console.error('[vpn] get_status failed:', e)
       }
+      // 提权重启后自动连接：后端 get_pending_auto_connect 返回 profile_id（取后即空）。
+      // 仅提权实例启动时非 None，普通启动返回 null 不触发。
+      try {
+        const pendingId = await invoke<string | null>('get_pending_auto_connect')
+        if (pendingId) {
+          // 确认 profile 仍存在（用户可能在提权窗口未弹出期间删了它）
+          if (this.profiles.some((p) => p.id === pendingId)) {
+            this.selectedProfileId = pendingId
+            await this.connect(pendingId)
+          }
+        }
+      } catch (e) {
+        console.error('[vpn] get_pending_auto_connect failed:', e)
+      }
       this.ready = true
     },
 
@@ -176,10 +192,18 @@ export const useVpnStore = defineStore('vpn', {
     },
 
     async connect(profileId: string) {
-      // 按代理模式选 command：tun 走 connect_tun（管理员+wintun），pac 走 connect
-      if (this.settings.proxy_mode === 'tun') {
+      // 找 profile 看协议类型：GP 走 connect（后端按 protocol 分派到 gp_mode），
+      // EasyConnect 按 proxy_mode 分 connect_tun（管理员+wintun）/ connect（pac）。
+      const profile = this.profiles.find((p) => p.id === profileId)
+      const isGp = profile?.protocol === 'globalprotect'
+      if (isGp) {
+        // GP 协议：固定走 openconnect-tun，统一调 connect（后端内部分派）
+        await invoke('connect', { profileId })
+      } else if (this.settings.proxy_mode === 'tun') {
+        // EasyConnect tun 模式：connect_tun（管理员+wintun）
         await invoke('connect_tun', { profileId })
       } else {
+        // EasyConnect pac 模式
         await invoke('connect', { profileId })
       }
     },

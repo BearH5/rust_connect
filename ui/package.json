@@ -7,17 +7,22 @@
     "dev": "vite",
     "build": "vite build && vue-tsc --noEmit",
     "build:fast": "vite build",
-    "typecheck": "vue-tsc --noEmit"
+    "typecheck": "vue-tsc --noEmit",
+    "tauri": "tauri"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.10.1",
     "pinia": "^4.0.2",
     "vue": "^3.5.40"
   },
   "devDependencies": {
+    "@rolldown/binding-win32-x64-msvc": "^1.2.4",
+    "@tauri-apps/cli": "^2.11.4",
     "@vitejs/plugin-vue": "^6.0.8",
     "typescript": "^5.9.3",
     "vite": "^8.2.0",

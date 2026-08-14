@@ -17,6 +17,7 @@ function emptyForm(): Profile {
     username: '',
     password: '',
     socks_port: 1080,
+    protocol: 'easyconnect',
   }
 }
 
@@ -74,6 +75,7 @@ function onCancel() {
       <thead>
         <tr>
           <th>名称</th>
+          <th>协议</th>
           <th>服务器</th>
           <th>用户名</th>
           <th>SOCKS5 端口</th>
@@ -82,13 +84,18 @@ function onCancel() {
       </thead>
       <tbody>
         <tr v-if="store.profiles.length === 0">
-          <td colspan="5" class="empty-row">暂无配置，点「新增」添加</td>
+          <td colspan="6" class="empty-row">暂无配置，点「新增」添加</td>
         </tr>
         <tr v-for="p in store.profiles" :key="p.id">
           <td>{{ p.name }}</td>
+          <td>
+            <span class="proto-tag" :class="p.protocol === 'globalprotect' ? 'gp' : 'ec'">
+              {{ p.protocol === 'globalprotect' ? 'GlobalProtect' : 'EasyConnect' }}
+            </span>
+          </td>
           <td class="mono">{{ p.server }}</td>
           <td>{{ p.username }}</td>
-          <td>{{ p.socks_port }}</td>
+          <td>{{ p.protocol === 'globalprotect' ? '—' : p.socks_port }}</td>
           <td class="ops">
             <button class="btn" @click="onEdit(p)">编辑</button>
             <button class="btn danger" @click="onDelete(p)">删除</button>
@@ -104,14 +111,33 @@ function onCancel() {
         <div class="form-grid">
           <label>名称</label>
           <input v-model="form.name" class="field" placeholder="如：浙大 RVPN" />
+          <label>协议</label>
+          <select v-model="form.protocol" class="field">
+            <option value="easyconnect">EasyConnect（深信服）</option>
+            <option value="globalprotect">GlobalProtect（Palo Alto）</option>
+          </select>
           <label>服务器</label>
-          <input v-model="form.server" class="field" placeholder="rvpn.zju.edu.cn:443" />
+          <input
+            v-model="form.server"
+            class="field"
+            :placeholder="form.protocol === 'globalprotect' ? 'GP 地址:端口，如 114.250.31.2:4430' : 'rvpn.zju.edu.cn:443'"
+          />
           <label>用户名</label>
           <input v-model="form.username" class="field" />
           <label>密码</label>
           <input v-model="form.password" class="field" type="password" />
           <label>SOCKS5 端口</label>
-          <input v-model.number="form.socks_port" class="field" type="number" min="1" max="65535" />
+          <input
+            v-model.number="form.socks_port"
+            class="field"
+            type="number"
+            min="1"
+            max="65535"
+            :disabled="form.protocol === 'globalprotect'"
+          />
+          <small v-if="form.protocol === 'globalprotect'" class="hint gp-hint">
+            GlobalProtect 协议通过 openconnect 建立 TUN 隧道（需系统安装 openconnect ≥8.0），不使用 SOCKS5 端口。
+          </small>
         </div>
         <div class="modal-actions">
           <button class="btn" @click="onCancel">取消</button>
@@ -206,5 +232,36 @@ h2 {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+/* 协议标签 */
+.proto-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.proto-tag.ec {
+  background: var(--bg-soft);
+  color: var(--text-soft);
+}
+.proto-tag.gp {
+  background: #e8f0fe;
+  color: #1a73e8;
+}
+/* 表单内提示 */
+.hint {
+  grid-column: 2 / 3;
+  color: var(--text-soft);
+  font-size: 12px;
+  margin-top: -4px;
+}
+.gp-hint {
+  white-space: normal;
+  line-height: 1.4;
+}
+.field:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 </style>

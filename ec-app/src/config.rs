@@ -18,6 +18,10 @@ pub struct Profile {
     pub username: String,
     pub password: String,
     pub socks_port: u16,
+    /// 协议类型："easyconnect"（默认，Sangfor EasyConnect）或 "globalprotect"（Palo Alto GP）。
+    /// 缺省 easyconnect，保证旧 config.json 反序列化不破坏。
+    #[serde(default = "default_protocol")]
+    pub protocol: String,
 }
 
 impl Profile {
@@ -37,6 +41,7 @@ impl Profile {
             username,
             password,
             socks_port,
+            protocol: default_protocol(),
         }
     }
 
@@ -54,6 +59,7 @@ impl Default for Profile {
             username: String::new(),
             password: String::new(),
             socks_port: Self::DEFAULT_SOCKS_PORT,
+            protocol: default_protocol(),
         }
     }
 }
@@ -72,6 +78,11 @@ pub struct Settings {
 /// proxy_mode 默认 "pac"。
 fn default_proxy_mode() -> String {
     "pac".to_string()
+}
+
+/// protocol 默认 "easyconnect"。
+fn default_protocol() -> String {
+    "easyconnect".to_string()
 }
 
 /// 顶层配置：profiles 列表 + 上次使用的 profile + 设置。

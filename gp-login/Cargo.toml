@@ -1,0 +1,32 @@
+[package]
+name = "gp-login"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# GlobalProtect 登录模块：用纯 Rust + reqwest 实现 GP 的 portal/gateway 登录流程。
+# 参考 yuezk/GlobalProtect-openconnect 的 gpapi crate 设计。
+# 这部分走普通 HTTPS（/global-protect/prelogin.esp, getconfig.esp, /ssl-vpn/login.esp），
+# 不涉及 GP 隧道协议（gpst），隧道层由外部 openconnect 子进程处理。
+
+[dependencies]
+# HTTP 客户端，必须能忽略自签名证书（danger_accept_invalid_certs）
+reqwest = { version = "0.12", features = ["blocking", "rustls-tls"], default-features = false }
+# XML 解析（prelogin/getconfig/login 响应都是 XML）
+roxmltree = "0.20"
+# URL 编码表单字段
+urlencoding = "2"
+# 错误派生
+thiserror = "1"
+# 序列化（结果给 ec-app 用）
+serde = { version = "1", features = ["derive"] }
+# 生成 host-id（GP 客户端标识）
+uuid = { version = "1", features = ["v4"] }
+# 获取本机名（GP computer 字段）
+hostname = "0.4"
+# 日志
+log = "0.4"
+
+[dev-dependencies]
+# examples/login_test.rs 用：环境变量驱动的日志输出
+env_logger = "0.11"

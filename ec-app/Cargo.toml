@@ -1,6 +1,6 @@
 [package]
 name = "ec-app"
-version = "0.1.0"
+version = "0.2.1"
 edition = "2021"
 publish = false
 
@@ -18,15 +18,21 @@ tauri = { version = "2", features = ["tray-icon"] }
 ec-proxy = { path = "../ec-proxy" }
 ec-login = { path = "../ec-login" }
 ec-protocol = { path = "../ec-protocol" }
+gp-login = { path = "../gp-login" }
+gp-tunnel = { path = "../gp-tunnel" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
-tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "net", "io-util", "time"] }
+tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "net", "io-util", "time", "process"] }
 log = "0.4"
 # 开机自启
 tauri-plugin-autostart = "2"
 # 单实例：第二个实例启动时退出并激活已有窗口（VPN 软件不应多开）
 tauri-plugin-single-instance = "2"
+# 自动更新：检查/下载/安装带签名的更新包（GitHub Releases）
+tauri-plugin-updater = "2"
+# 更新安装后重启应用（Windows 由安装器自动重启，此插件兜底其他平台）
+tauri-plugin-process = "2"
 # 跨平台目录路径（config / data / cache 目录定位）
 dirs = "5"
 

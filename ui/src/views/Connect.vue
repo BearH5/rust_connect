@@ -13,6 +13,9 @@ const errorMsg = ref('')
 
 const selected = computed(() => store.selectedProfile)
 
+// 当前选中 profile 是否为 GlobalProtect 协议（GP 固定 TUN，不显示代理模式选择和 SOCKS5 端口）
+const isGp = computed(() => selected.value?.protocol === 'globalprotect')
+
 const statusText = computed(() => {
   switch (store.status.state) {
     case 'Disconnected':
@@ -86,7 +89,7 @@ async function onModeChange(e: Event) {
           :disabled="isActive(store.status)"
         >
           <option v-for="p in store.profiles" :key="p.id" :value="p.id">
-            {{ p.name }} ({{ p.server }})
+            [{{ p.protocol === 'globalprotect' ? 'GP' : 'EC' }}] {{ p.name }} ({{ p.server }})
           </option>
         </select>
       </div>
@@ -110,13 +113,18 @@ async function onModeChange(e: Event) {
             :disabled="isActive(store.status)"
           />
         </div>
-        <div class="field-row">
+        <div v-if="!isGp" class="field-row">
           <label>SOCKS5 端口</label>
           <input class="field" :value="selected.socks_port" disabled />
         </div>
       </div>
 
-      <div class="field-row">
+      <div v-if="isGp" class="field-row gp-note">
+        <label></label>
+        <small>GlobalProtect 协议通过 openconnect 建立 TUN 隧道，需系统安装 openconnect ≥8.0 及管理员权限。</small>
+      </div>
+
+      <div v-if="!isGp" class="field-row">
         <label>代理模式</label>
         <select
           class="field"
@@ -249,5 +257,10 @@ h2 {
 }
 .status-info .v {
   font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+}
+.gp-note small {
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.4;
 }
 </style>
