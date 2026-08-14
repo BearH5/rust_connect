@@ -147,17 +147,17 @@ pub async fn connect_vpn(
                     _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {}
                     _ = keepalive_cancel.notified() => return,
                 }
-                // spawn_blocking 调 ec_login::keep_session_alive（reqwest::blocking）
+                // spawn_blocking 调 ec_protocol::token::keep_session_alive（ec-utls 特殊 TLS）
                 let server = keepalive_server.clone();
                 let twf = keepalive_twf.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    ec_login::keep_session_alive(&server, &twf)
+                    ec_protocol::token::keep_session_alive(&server, &twf)
                 })
                 .await;
                 match result {
-                    Ok(Ok(())) => log::debug!("会话保活成功"),
-                    Ok(Err(e)) => log::warn!("会话保活失败: {e}"),
-                    Err(e) => log::warn!("会话保活 task panic: {e}"),
+                    Ok(Ok(())) => log::info!("[保活] update_session 成功"),
+                    Ok(Err(e)) => log::warn!("[保活] update_session 失败: {e}"),
+                    Err(e) => log::warn!("[保活] task panic: {e}"),
                 }
             }
         });

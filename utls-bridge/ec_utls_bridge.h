@@ -12,6 +12,8 @@
 
 #ifndef GO_CGO_GOSTRING_TYPEDEF
 typedef struct { const char *p; ptrdiff_t n; } _GoString_;
+extern size_t _GoStringLen(_GoString_ s);
+extern const char *_GoStringPtr(_GoString_ s);
 #endif
 
 #endif
@@ -50,9 +52,15 @@ typedef size_t GoUintptr;
 typedef float GoFloat32;
 typedef double GoFloat64;
 #ifdef _MSC_VER
+#if !defined(__cplusplus) || _MSVC_LANG <= 201402L
 #include <complex.h>
 typedef _Fcomplex GoComplex64;
 typedef _Dcomplex GoComplex128;
+#else
+#include <complex>
+typedef std::complex<float> GoComplex64;
+typedef std::complex<double> GoComplex128;
+#endif
 #else
 typedef float _Complex GoComplex64;
 typedef double _Complex GoComplex128;
@@ -80,26 +88,12 @@ typedef struct { void *data; GoInt len; GoInt cap; } GoSlice;
 extern "C" {
 #endif
 
-
-// 建立 TLS 连接，返回句柄（>0 成功，<=0 失败）。
-// mode: 0=普通(HelloGolang), 1=特殊(L3IP/RC4/伪扩展)
-extern __declspec(dllexport) long long int ec_handshake(char* server, int mode);
-
-// 返回最近一次 ec_handshake 错误的 C 字符串（NULL 表示无错误）。
-// 调用方不应 free；指针由库内部管理。
-extern __declspec(dllexport) char* ec_last_error();
-
-// 读取该连接 ServerHello 的 session_id，写入 buf，返回长度（<0 失败）。
-extern __declspec(dllexport) long long int ec_conn_session_id(long long int handle, char* buf, long long int bufLen);
-
-// 从连接读字节，返回读取数（<0 失败，0 EOF）。
-extern __declspec(dllexport) long long int ec_conn_read(long long int handle, char* buf, long long int bufLen);
-
-// 向连接写字节，返回写入数（<0 失败）。
-extern __declspec(dllexport) long long int ec_conn_write(long long int handle, char* buf, long long int bufLen);
-
-// 关闭并移除连接。
-extern __declspec(dllexport) void ec_conn_close(long long int handle);
+extern long long int ec_handshake(char* server, int mode);
+extern char* ec_last_error(void);
+extern long long int ec_conn_session_id(long long int handle, char* buf, long long int bufLen);
+extern long long int ec_conn_read(long long int handle, char* buf, long long int bufLen);
+extern long long int ec_conn_write(long long int handle, char* buf, long long int bufLen);
+extern void ec_conn_close(long long int handle);
 
 #ifdef __cplusplus
 }

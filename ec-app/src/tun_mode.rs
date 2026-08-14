@@ -81,40 +81,72 @@ fn has_cap_net_admin() -> bool {
     false
 }
 
-/// 以管理员身份重新启动当前进程（UAC 弹窗）。
+/// 提权握手结果。
+pub enum ElevateOutcome {
+    /// 提权实例已确认启动（命名事件收到信号），原进程应退出。
+    Started,
+    /// 用户在 UAC 点了「否」或提权实例启动失败，原进程应保留。
+    Cancelled,
+}
+
+/// 以管理员身份重新启动当前进程（UAC 弹窗），并用命名事件握手确认 B 是否启动。
 ///
-/// 用 PowerShell `Start-Process -Verb RunAs` 触发 UAC。
-/// 重启时带 `--relaunched-as-admin` 参数，新实例据此跳过再次提权。
-/// 返回 Ok(true) 表示已发起提权（当前实例应退出），
-/// Ok(false) 表示用户取消了 UAC（留在当前实例）。
+/// 流程：生成 UUID → CreateEventW → PowerShell Start-Process（带 UUID）→
+/// WaitForSingleObject(15s)。收到信号=B 已启动，超时=用户取消/失败。
 ///
-/// Linux：不走重启提权，返回 Ok(false)。调用方检测 is_admin() == false 时
+/// Windows 用 PowerShell `Start-Process -Verb RunAs` 触发 UAC。
+/// Linux：不走重启提权，返回 Cancelled。调用方检测 is_admin() == false 时
 /// 应提示用户手动 `sudo setcap cap_net_admin+ep <exe>`（见 commands.rs）。
-pub fn relaunch_as_admin() -> std::io::Result<bool> {
-    #[cfg(target_os = "linux")]
-    {
-        // setcap 方案：不重启。调用方检测 is_admin() == false 时提示用户手动 setcap。
-        Ok(false)
-    }
+pub fn relaunch_as_admin() -> std::io::Result<ElevateOutcome> {
     #[cfg(target_os = "windows")]
     {
+        use crate::elevation;
+
         let exe = std::env::current_exe()?;
         let exe_str = exe.to_string_lossy().to_string();
-        // 用 PowerShell 提权重启；Start-Process -Verb RunAs 会弹 UAC。
-        // 返回 -1 表示用户取消/失败，返回 0 表示已启动。
+        let token = uuid::Uuid::new_v4().to_string();
+
+        // 提权前创建命名事件；B 启动后 OpenEventW + SetEvent。
+        let handle = elevation::create_handshake_event(&token)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+        // PowerShell 启动 B 并传递 token。B 用 `--relaunched-as-admin {token}` 启动。
+        // 脚本全英文，避免 PowerShell 5.1 GBK 解析 UTF-8 乱码。
         let script = format!(
-            "try {{ $p = Start-Process -FilePath '{}' -ArgumentList '--relaunched-as-admin' -Verb RunAs -PassThru; if ($p) {{ exit 0 }} else {{ exit -1 }} }} catch {{ exit -1 }}",
-            exe_str.replace('\'', "''")
+            "try {{ Start-Process -FilePath '{}' -ArgumentList '--relaunched-as-admin','{}' -Verb RunAs }} catch {{ exit 1 }}",
+            exe_str.replace('\'', "''"),
+            token
         );
         let out = std::process::Command::new("powershell")
             .args(["-NoProfile", "-Command", &script])
             .creation_flags(CREATE_NO_WINDOW)
             .output()?;
-        Ok(out.status.success())
+
+        // PowerShell 自身失败（如 powershell 缺失）→ 直接返回错误，不等握手。
+        if !out.status.success() {
+            let diag = format!(
+                "exit={} stderr={}",
+                out.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            // 关闭未用的事件句柄，避免泄漏。
+            elevation::wait_handshake(handle, 0);
+            return Err(std::io::Error::new(std::io::ErrorKind::Other, diag));
+        }
+
+        // PowerShell 成功只代表命令执行了，不代表 B 启动了（用户可能还没点 UAC）。
+        // 用命名事件等 B 的信号：15s 超时覆盖 UAC 思考 + B 初始化时间。
+        let started = elevation::wait_handshake(handle, 15_000);
+        Ok(if started {
+            ElevateOutcome::Started
+        } else {
+            ElevateOutcome::Cancelled
+        })
     }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[cfg(not(target_os = "windows"))]
     {
-        Ok(false)
+        // Linux 等平台不走重启提权；调用方提示手动 setcap。
+        Ok(ElevateOutcome::Cancelled)
     }
 }
 

@@ -1,2 +1,10 @@
 [toolchain]
-channel = "stable"
+# 不指定 channel：让各平台用 rustup 默认 toolchain。
+#   - Windows：需 `rustup default stable-x86_64-pc-windows-gnu`。
+#     原因：embed-resource 作为 build-dependency 按 host target_env 选资源编译器，
+#     gnu host → windres 产 .a（gnu ld 可链接）；msvc host → rc.exe 产 COFF .lib，
+#     gnu target 的 ld 无法链接（"resource.lib: file format not recognized"）。
+#     历史上写死 channel="stable-x86_64-pc-windows-gnu" 会破坏 Linux 构建
+#    （rustup 拒绝跨平台 triple），故改为只约定 targets，channel 由各平台默认值决定。
+#   - Linux：`rustup default stable`（默认即 x86_64-unknown-linux-gnu）。
+targets = ["x86_64-pc-windows-gnu"]

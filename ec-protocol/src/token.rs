@@ -95,3 +95,52 @@ pub fn request_token(server: &str, twf_id: &str) -> Result<String, ProtocolError
 
     Ok(session_id_hex)
 }
+
+/// 会话保活：用 ec-utls 普通模式（与 request_token 一致）调 /por/update_session.csp。
+///
+/// 对照 zju-connect request.go:482-535 requestUpdateSession。
+///
+/// 必须用 ec-utls 而非 reqwest：服务端对 TLS ClientHello 敏感，
+/// reqwest/rustls 的默认握手可能被拒。同时 twfid 要同时放 query 和 Cookie 头。
+///
+/// 成功响应含 `<Message>success</Message><ErrorCode>1</ErrorCode>`。
+pub fn keep_session_alive(server: &str, twf_id: &str) -> Result<(), ProtocolError> {
+    let mut conn = UtlsConn::connect(server, TlsMode::Normal)?;
+
+    let request = format!(
+        "GET /por/update_session.csp?twfid={twf_id}&apiversion=1 HTTP/1.1\r\n\
+         Host: {server}\r\n\
+         Cookie: TWFID={twf_id}\r\n\
+         User-Agent: EasyConnect_windows\r\n\
+         Connection: close\r\n\
+         \r\n"
+    );
+    conn.write_all(request.as_bytes())
+        .map_err(ProtocolError::Io)?;
+
+    // 读完整响应（Connection: close，服务端发完会关闭连接，read 返回 0 即结束）
+    let mut buf = Vec::with_capacity(4096);
+    let mut chunk = [0u8; 1024];
+    loop {
+        match conn.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(e) => return Err(ProtocolError::Io(e)),
+        }
+    }
+
+    let body = String::from_utf8_lossy(&buf);
+    // 响应可能含 HTTP 头 + XML body，用 contains 检查关键字段即可
+    if body.contains("<Message>success</Message>") && body.contains("<ErrorCode>1</ErrorCode>") {
+        Ok(())
+    } else if body.contains("404") || body.contains("Not Found") {
+        Err(ProtocolError::Token(format!(
+            "update_session: 服务器不支持 (404)"
+        )))
+    } else {
+        Err(ProtocolError::Token(format!(
+            "update_session: 意外响应: {}",
+            body.chars().take(200).collect::<String>()
+        )))
+    }
+}

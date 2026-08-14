@@ -2,6 +2,9 @@
 
 mod commands;
 mod config;
+mod elevation;
+mod gp_mode;
+mod silent_console;
 mod state;
 mod system_proxy;
 mod tun_mode;
@@ -16,22 +19,54 @@ use tauri::{
 };
 
 fn main() {
-    tauri::Builder::default()
+    // 分配并隐藏控制台：让 wintun-bindings 等库派生的 netsh/net 等控制台
+    // 子进程继承隐藏控制台，不弹出可见黑窗。必须在任何子进程创建前调用。
+    silent_console::hide_console();
+
+    // 提权实例由 UAC 启动，带 `--relaunched-as-admin {token}` 参数。
+    // 1) signal 命名事件通知原进程退出（token 即事件名后缀）。
+    // 2) 跳过 single-instance 插件，否则被判定为"第二实例"自动退出。
+    let args: Vec<String> = std::env::args().collect();
+    let admin_flag_idx = args.iter().position(|a| a == "--relaunched-as-admin");
+    if let Some(idx) = admin_flag_idx {
+        if let Some(token) = args.get(idx + 1) {
+            crate::elevation::signal_handshake(token);
+        }
+    }
+    let relaunched_as_admin = admin_flag_idx.is_some();
+
+    let mut builder = tauri::Builder::default();
+    if !relaunched_as_admin {
+        // 单实例：第二个实例启动时，激活已有窗口并退出新实例。
+        // VPN 软件多开会导致会话冲突、路由重复等问题，必须禁止。
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }));
+    }
+    builder
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--autostart"]),
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(AppState {
             session: std::sync::Mutex::new(None),
             config: std::sync::Mutex::new(ConfigStore::load()),
             original_proxy: std::sync::Mutex::new(None),
             pac_server: std::sync::Mutex::new(None),
+            pending_auto_connect: std::sync::Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             commands::connect,
             commands::connect_tun,
             commands::disconnect,
             commands::get_status,
+            commands::get_pending_auto_connect,
             commands::list_profiles,
             commands::save_profile,
             commands::delete_profile,
@@ -42,6 +77,18 @@ fn main() {
             commands::is_autostart_enabled,
         ])
         .setup(|app| {
+            // 提权实例：从 last_profile_id 读待连接 profile，前端拉取后自动连接。
+            // 普通启动时跳过。这里重新检测参数，避免闭包捕获 main 局部变量。
+            let is_relaunched = std::env::args().any(|a| a == "--relaunched-as-admin");
+            if is_relaunched {
+                if let Some(state) = app.try_state::<AppState>() {
+                    let pid = state.config.lock().unwrap().config.last_profile_id.clone();
+                    if let Some(pid) = pid {
+                        *state.pending_auto_connect.lock().unwrap() = Some(pid);
+                    }
+                }
+            }
+
             // 系统托盘菜单：显示窗口 / 断开 / 退出
             let show = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
             let disconnect_item =

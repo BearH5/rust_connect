@@ -49,6 +49,8 @@ pub struct AppState {
     pub original_proxy: std::sync::Mutex<Option<crate::system_proxy::OriginalProxySettings>>,
     /// PAC HTTP server 的 task handle，断开时 abort。
     pub pac_server: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// 提权重启后待自动连接的 profile_id（仅提权实例启动时设置，前端拉取一次后清空）。
+    pub pending_auto_connect: std::sync::Mutex<Option<String>>,
 }
 
 impl AppState {

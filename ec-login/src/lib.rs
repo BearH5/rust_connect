@@ -328,13 +328,23 @@ pub fn keep_session_alive(server: &str, twf_id: &str) -> Result<(), LoginError> 
     let url = format!("https://{server}/por/update_session.csp?twfid={twf_id}&apiversion=1");
     let resp = client
         .get(&url)
+        // 对照 zju-connect request.go:503：twfid 同时放 query 和 Cookie 头。
+        // 仅放 query 服务器可能不认（会话仍被判定空闲），必须带 Cookie。
+        .header("Cookie", format!("TWFID={twf_id}"))
         .header("User-Agent", "EasyConnect_windows")
         .send()?;
 
-    if resp.status() != reqwest::StatusCode::OK {
+    let status = resp.status();
+    // 404 表示服务器不支持 update_session，对照 zju-connect 返回 errNotFound。
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Err(LoginError::MissingField(
+            "update_session: 服务器不支持 (404)".into(),
+        ));
+    }
+    if status != reqwest::StatusCode::OK {
         return Err(LoginError::MissingField(format!(
             "update_session: 状态码 {}",
-            resp.status()
+            status
         )));
     }
 

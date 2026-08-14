@@ -9,7 +9,12 @@ use tokio::sync::Notify;
 use crate::config::Profile;
 use crate::state::{AppState, VpnSession, VpnStatus};
 
-/// 按 `profile_id` 连接。spawn tokio task 跑 `connect_vpn`。
+/// 按 `profile_id` 连接。spawn tokio task 跑连接流程。
+///
+/// 按 `profile.protocol` 分派：
+///   - `globalprotect`：走 `gp_mode::connect_gp_vpn`（GP 登录 + openconnect 子进程）。
+///     GP 协议固定使用 openconnect 管理的 TUN，不区分 pac/tun 模式。
+///   - 其他（含默认 `easyconnect`）：走原 EasyConnect 逻辑（proxy_mode 分 pac/tun）。
 #[tauri::command]
 pub async fn connect(
     app: AppHandle,
@@ -57,7 +62,89 @@ pub async fn connect(
     let username = profile.username.clone();
     let password = profile.password.clone();
     let socks_port = profile.socks_port;
+    let is_gp = profile.protocol == "globalprotect";
 
+    // ===== GlobalProtect 分支 =====
+    // GP 走纯 Rust 的 GPST 隧道 + 自管 TUN 网卡，不分 pac/tun，
+    // 但创建 tun 网卡需要管理员/CAP_NET_ADMIN。
+    if is_gp {
+        if !crate::tun_mode::is_admin() {
+            // 清理刚设上的 session，让前端可重试
+            {
+                let mut session = state.session.lock().unwrap();
+                *session = None;
+            }
+            #[cfg(target_os = "linux")]
+            {
+                return Err(
+                    "GlobalProtect 模式需要 CAP_NET_ADMIN 权限来创建 tun 网卡。\n\
+                     请运行以下命令后重启程序：sudo setcap cap_net_admin+ep <本程序路径>"
+                        .into(),
+                );
+            }
+            #[cfg(target_os = "windows")]
+            {
+                // UAC 提权重启 + 命名事件握手（与 connect_tun 相同机制）。
+                // last_profile_id 已在上方记录，提权实例启动后前端经
+                // get_pending_auto_connect 自动重连 GP。
+                match crate::tun_mode::relaunch_as_admin() {
+                    Ok(crate::tun_mode::ElevateOutcome::Started) => {
+                        // 握手成功：提权实例已确认存活，原进程立即退出让位。
+                        std::process::exit(0);
+                    }
+                    Ok(crate::tun_mode::ElevateOutcome::Cancelled) => {
+                        return Err("提权请求已取消（UAC 未确认或超时）。请重试，或手动以管理员身份运行本程序。".into());
+                    }
+                    Err(e) => {
+                        return Err(format!("提权重启失败: {e}"));
+                    }
+                }
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+            {
+                return Err("GlobalProtect 模式当前不支持此平台".into());
+            }
+        }
+        // 确保 wintun.dll（不存在则下载，可能耗时，放 spawn_blocking；Linux 返回空路径）
+        let wintun_path = tokio::task::spawn_blocking(crate::tun_mode::ensure_wintun)
+            .await
+            .map_err(|e| format!("wintun.dll 准备 task panic: {e}"))?
+            .map_err(|e| format!("wintun.dll 准备失败: {e}"))?;
+
+        tokio::spawn(async move {
+            let app_for_status = app_clone.clone();
+            match crate::gp_mode::connect_gp_vpn(
+                app_clone.clone(),
+                server,
+                username,
+                password,
+                cancel.clone(),
+                wintun_path,
+            )
+            .await
+            {
+                Ok(()) => log::info!("GP 连接结束（正常）"),
+                Err(e) => {
+                    log::error!("GP 连接失败: {e}");
+                    let st = app_clone.state::<AppState>();
+                    st.set_error(e.clone());
+                    let _ = app_clone.emit(
+                        "vpn:status",
+                        serde_json::json!({ "state": "error", "message": &e }),
+                    );
+                }
+            }
+            // 清理 session
+            let st = app_for_status.state::<AppState>();
+            let mut session = st.session.lock().unwrap();
+            *session = None;
+            let _ = app_for_status
+                .emit("vpn:status", serde_json::json!({ "state": "disconnected" }));
+        });
+        return Ok(());
+    }
+
+    // ===== EasyConnect 分支（原逻辑）=====
     // 读取代理模式（tun 需要管理员 + wintun.dll）
     let proxy_mode = {
         let cfg = state.config.lock().unwrap();
@@ -169,17 +256,18 @@ pub async fn connect_tun(
         }
         #[cfg(target_os = "windows")]
         {
-            // 方案 B：UAC 提权重启当前程序。新实例以管理员运行后，
-            // 用户再点连接即可。返回提示让前端显示。
+            // UAC 提权重启 + 命名事件握手：确认 B 是否真正启动。
             match crate::tun_mode::relaunch_as_admin() {
-                Ok(true) => {
-                    return Err("已请求管理员权限，请在弹出的确认窗口点击「是」。新窗口启动后再次点击连接即可。".into());
+                Ok(crate::tun_mode::ElevateOutcome::Started) => {
+                    // 握手成功：提权实例已确认存活，原进程立即退出让位。
+                    std::process::exit(0);
                 }
-                Ok(false) => {
-                    return Err("需要管理员权限才能使用 TUN 模式。已尝试提权但被取消，请手动以管理员身份运行本程序，或改用系统代理模式。".into());
+                Ok(crate::tun_mode::ElevateOutcome::Cancelled) => {
+                    // 用户点了「否」或超时：原进程保留，提示后可重试。
+                    return Err("提权请求已取消（UAC 未确认或超时）。请重试，或手动以管理员身份运行本程序，或改用系统代理模式。".into());
                 }
                 Err(e) => {
-                    return Err(format!("提权重启失败: {e}，请手动以管理员身份运行本程序，或改用系统代理模式。"));
+                    return Err(format!("提权重启失败: {e}"));
                 }
             }
         }
@@ -403,4 +491,12 @@ pub fn is_autostart_enabled(app: tauri::AppHandle) -> Result<bool, String> {
     app.autolaunch()
         .is_enabled()
         .map_err(|e| e.to_string())
+}
+
+/// 提权重启后，前端拉取待自动连接的 profile_id（取后即空，保证只连一次）。
+///
+/// 返回 None 表示无需自动连接（普通启动或已消费）。
+#[tauri::command]
+pub fn get_pending_auto_connect(state: State<'_, AppState>) -> Option<String> {
+    state.pending_auto_connect.lock().unwrap().take()
 }

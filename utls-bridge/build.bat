@@ -6,7 +6,7 @@ set CC=D:\dev_evn\mingw64\bin\gcc.exe
 set GOPATH=D:\dev_evn\gopath
 set GOTOOLCHAIN=local
 set PATH=D:\dev_evn\Go\bin;D:\dev_evn\mingw64\bin;%PATH%
-go build -buildmode=c-shared -o ec_utls_bridge.dll .
+go build -buildmode=c-shared -ldflags "-s -w" -o ec_utls_bridge.dll .
 if errorlevel 1 (
     echo 构建失败
     exit /b 1
