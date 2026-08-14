@@ -1,13 +1,18 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "RustConnect",
-  "version": "0.1.0",
   "identifier": "com.rustconnect.app",
   "build": {
     "frontendDist": "../ui/dist",
     "devUrl": "http://localhost:1420",
-    "beforeDevCommand": "npm --prefix ../ui run dev",
-    "beforeBuildCommand": "npm --prefix ../ui run build"
+    "beforeDevCommand": {
+      "script": "npm run dev",
+      "cwd": "../ui"
+    },
+    "beforeBuildCommand": {
+      "script": "npm run build",
+      "cwd": "../ui"
+    }
   },
   "app": {
     "windows": [{ "title": "RustConnect", "width": 800, "height": 600 }],
@@ -16,15 +21,27 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": ["icons/icon.ico", "icons/icon.png"],
-    "resources": {
-      "../utls-bridge/ec_utls_bridge.dll": "ec_utls_bridge.dll",
-      "target/x86_64-pc-windows-gnu/release/WebView2Loader.dll": "WebView2Loader.dll"
-    },
     "windows": {
       "webviewInstallMode": {
-        "type": "embedBootstrapper",
+        "type": "downloadBootstrapper",
         "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkwMTM1RTMxQzNGRUM5QkIKUldTN3lmN0RNVjRUa0ZxYkNVWEk5SitCYUtkNUpLb3BqSlNjM2VNMEltOTAxUDBLK2JYU2xEQVoK",
+      "endpoints": [
+        "https://github.com/BearH5/rust_connect/releases/latest/download/latest.json",
+        "https://gh-proxy.com/https://github.com/BearH5/rust_connect/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

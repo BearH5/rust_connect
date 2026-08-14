@@ -19,3 +19,8 @@ diag/*.exe
 .DS_Store
 Thumbs.db
 *.a
+
+# 签名私钥（自动更新，绝不入库）
+*.key
+*.so
+.zcode/

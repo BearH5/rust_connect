@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Linux: Tauri 2 系统依赖（webkit2gtk 4.1 / appindicator / svg / patchelf）
+      - name: Install system dependencies (ubuntu)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      # Go: 编译 utls-bridge c-shared 库（EasyConnect 特殊 TLS 指纹）
+      # 注意不能直接跑 build.bat（内含本机硬编码路径），CI 内联执行等价命令
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build utls-bridge (windows)
+        if: matrix.platform == 'windows-latest'
+        working-directory: utls-bridge
+        env:
+          CGO_ENABLED: '1'
+          GOTOOLCHAIN: local
+        # runner 自带 mingw gcc（cgo 用）；dll 直接由 Rust MSVC 链接器链接，
+        # 不需要 gendef/dlltool 生成 mingw 导入库
+        run: go build -buildmode=c-shared -ldflags "-s -w" -o ec_utls_bridge.dll .
+
+      - name: Build utls-bridge (linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        working-directory: utls-bridge
+        env:
+          CGO_ENABLED: '1'
+        run: bash build.sh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm --prefix ui ci
+
+      # tauri-action：cargo build -> bundle -> 签名（TAURI_SIGNING_PRIVATE_KEY）
+      # -> 创建 GitHub Release -> 上传安装包 + .sig -> 跨平台合并 latest.json
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # 密钥无密码，显式置空避免 CLI 交互式 prompt（无 stdin 环境会失败）
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+        with:
+          # tauri 项目在 ec-app/ 子目录（非标准 src-tauri 布局），从仓库根目录跑
+          projectPath: .
+          tagName: v__VERSION__
+          releaseName: 'RustConnect v__VERSION__'
+          releaseBody: '详见提交历史。Windows 下载 RustConnect_x.y.z_x64-setup.exe，Linux 下载 .deb/.AppImage。'
+          releaseDraft: false
+          prerelease: false
+
+  # 收尾：给 latest.json 的下载 url 加镜像前缀。
+  # gh-proxy 只代理请求、不重写 JSON 内容，所以必须在生成时就写对 url，
+  # 否则国内用户能取到 latest.json 却下载不动安装包。
+  # MIRROR_PREFIX 置空则用 GitHub 直链。
+  mirror-updates:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      MIRROR_PREFIX: 'https://gh-proxy.com/'
+    steps:
+      - name: Rewrite latest.json download urls with mirror prefix
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          curl -fSL "https://github.com/${{ github.repository }}/releases/download/${TAG}/latest.json" -o latest.json
+          python3 - <<'EOF'
+          import json, os
+          prefix = os.environ['MIRROR_PREFIX']
+          with open('latest.json') as f:
+              data = json.load(f)
+          for platform in data.get('platforms', {}).values():
+              url = platform.get('url', '')
+              if prefix and not url.startswith(prefix):
+                  platform['url'] = prefix + url
+          with open('latest.json', 'w') as f:
+              json.dump(data, f, indent=2)
+          print('rewritten latest.json:')
+          print(json.dumps(data, indent=2))
+          EOF
+          gh release upload "$TAG" latest.json --clobber --repo "${{ github.repository }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

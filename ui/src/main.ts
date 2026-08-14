@@ -2,6 +2,7 @@ import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import App from './App.vue'
 import { useVpnStore } from './stores/vpn'
+import { useUpdaterStore } from './stores/updater'
 
 const app = createApp(App)
 app.use(createPinia())
@@ -13,4 +14,10 @@ const store = useVpnStore()
 store.init().catch((e) => {
   // 非 Tauri 环境（纯浏览器调试）invoke 会失败，这里只打日志不抛。
   console.error('[vpn] init failed:', e)
+})
+
+// 初始化更新 store：拉版本号 + 延迟静默检查更新（有更新时显示横幅）。
+const updater = useUpdaterStore()
+updater.init().catch((e) => {
+  console.error('[updater] init failed:', e)
 })
