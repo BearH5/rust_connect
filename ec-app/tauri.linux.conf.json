@@ -3,6 +3,7 @@
   "bundle": {
     "resources": {
       "../utls-bridge/ec_utls_bridge.so": "ec_utls_bridge.so"
-    }
+    },
+    "targets": ["deb", "rpm"]
   }
 }
