@@ -22,7 +22,7 @@ jobs:
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf libfuse2
 
       # Go: 编译 utls-bridge c-shared 库（EasyConnect 特殊 TLS 指纹）
       # 注意不能直接跑 build.bat（内含本机硬编码路径），CI 内联执行等价命令
@@ -36,9 +36,15 @@ jobs:
         env:
           CGO_ENABLED: '1'
           GOTOOLCHAIN: local
-        # runner 自带 mingw gcc（cgo 用）；dll 直接由 Rust MSVC 链接器链接，
-        # 不需要 gendef/dlltool 生成 mingw 导入库
-        run: go build -buildmode=c-shared -ldflags "-s -w" -o ec_utls_bridge.dll .
+        # 1) go 产 c-shared dll + mingw gendef 产 .def
+        # 2) MSVC lib.exe 从 .def 生成 ec_utls_bridge.lib —— rustc(msvc) 链接
+        #    dylib=ec_utls_bridge 时找的是 .lib，没有它报 LNK1181
+        run: |
+          go build -buildmode=c-shared -ldflags "-s -w" -o ec_utls_bridge.dll .
+          gendef ec_utls_bridge.dll
+          $lib = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -find "VC\Tools\MSVC\*\bin\Hostx64\x64\lib.exe" | Select-Object -First 1
+          & $lib /def:ec_utls_bridge.def /machine:x64 /out:ec_utls_bridge.lib
+          Get-ChildItem ec_utls_bridge.*
 
       - name: Build utls-bridge (linux)
         if: matrix.platform == 'ubuntu-22.04'
@@ -52,6 +58,9 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: ui/package-lock.json
+
+      # 固定最新 stable（runner 预装的 rustc 可能滞后，行为有差异）
+      - uses: dtolnay/rust-toolchain@stable
 
       - name: Install frontend dependencies
         run: npm --prefix ui ci
