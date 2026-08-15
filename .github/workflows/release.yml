@@ -73,6 +73,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           # 密钥无密码，显式置空避免 CLI 交互式 prompt（无 stdin 环境会失败）
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+          # CI runner 无 /dev/fuse，linuxdeploy 等 AppImage 工具需自解压模式运行
+          APPIMAGE_EXTRACT_AND_RUN: '1'
         with:
           # tauri 项目在 ec-app/ 子目录（非标准 src-tauri 布局），从仓库根目录跑
           projectPath: .
